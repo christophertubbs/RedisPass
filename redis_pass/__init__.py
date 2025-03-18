@@ -1,5 +1,5 @@
 """
-Simple package used to easily reuse complication connection definitions
+Simple package used to easily reuse complicated Redis connection definitions
 """
 from __future__ import annotations
 
@@ -41,6 +41,29 @@ A pattern that matches on dataclass Field types of Literals
 - Given 'typing.Literal["example"]', the captured `value` will be '"example'"
 - Given 'Literal["example", 'other']', the captured `value` will be '"example", 'other'' 
 """
+
+
+def _get_default_home_path() -> pathlib.Path:
+    """
+    Gets the default home path. Will change depending on operating system
+
+    :return: The path to a reasonable 'home' directory if one is not defined
+    """
+    from platform import platform
+    build_name: str = platform().lower()
+
+    if 'windows' in build_name:
+        return pathlib.Path(f"C:/Users/{os.getlogin()}")
+    elif 'darwin' in build_name:
+        return pathlib.Path(f"/Users/{os.getlogin()}")
+    elif 'linux' in build_name:
+        return pathlib.Path(f"/home/{os.getlogin()}")
+
+    raise OSError(f"'{platform().split('-')[0]}' is not a supported OS. Please submit a ticket.")
+
+
+DEFAULT_HOME_PATH: pathlib.Path = _get_default_home_path()
+"""A default path to what may be considered the beginning of the local userspace"""
 
 
 @dataclasses.dataclass
@@ -287,13 +310,12 @@ def get_storage_path() -> pathlib.Path:
     """
     Get the path to a user's store
     """
-    return pathlib.Path(os.getenv("HOME", f"C:\\Users\\{os.getlogin()}")) / ".redis_pass.db"
+    return pathlib.Path(os.getenv("HOME", os.getenv("home", DEFAULT_HOME_PATH))) / ".redis_pass.db"
 
 
 def get_redis_pass_store() -> sqlite3.Connection:
     """
     Get a connection to the database containing the stored credentials
-    :return:
     """
     database_path: pathlib.Path = get_storage_path()
 
@@ -327,6 +349,7 @@ def get_redis_pass_store() -> sqlite3.Connection:
     UNIQUE(host, username, password, port, db, ssl)
 );"""
 
+    # Ensure that the database exists
     connection.execute(creation_script)
     connection.commit()
 
