@@ -32,6 +32,16 @@ Basic regular expression that matches on the type in an annotation,
 whether it's 'str' or 'typing.Optional[str]' (both become 'str')
 """
 
+_LITERAL_PATTERN: re.Pattern[str] = re.compile(
+    r"(typing\.)Literal\[(?P<value>(\"[^\"]+\"|\'[^\']+\')(,\s*(\"[^\"]+\"|\'[^\']+\'))*)]"
+)
+"""
+A pattern that matches on dataclass Field types of Literals
+
+- Given 'typing.Literal["example"]', the captured `value` will be '"example'"
+- Given 'Literal["example", 'other']', the captured `value` will be '"example", 'other'' 
+"""
+
 
 @dataclasses.dataclass
 class Credential:
@@ -39,25 +49,48 @@ class Credential:
     Redis credentials - most, if not all, of the parameters needed to form a redis connection
     """
     host: str = dataclasses.field(default='localhost')
+    """Specifies the hostname or IP address of the Redis/Valkey Server"""
     port: int = dataclasses.field(default=6379)
+    """The port number on which the Redis/Valkey Server is listening"""
     username: typing.Optional[str] = dataclasses.field(default=None)
+    """Specifies the username for authentication. Only used if the service is configured for ACL-based authentication"""
     password: typing.Optional[str] = dataclasses.field(default=None)
+    """Password for authenticating the connection"""
     db: int = dataclasses.field(default=0)
+    """The redis database number to connect to"""
     retry_on_timeout: bool = dataclasses.field(default=False)
+    """Whether to retry commands that timed out instead of raising an exception"""
     socket_timeout: typing.Optional[float] = dataclasses.field(default=None)
+    """Timeout in seconds for socket read operations. Blocks indefinitely if None"""
     socket_connect_timeout: typing.Optional[float] = dataclasses.field(default=None)
+    """Timeout in seconds for establishing a socket connection. Blocks indefinitely if None"""
     socket_keepalive: typing.Optional[bool] = dataclasses.field(default=None)
+    """Whether to enable TCP keepalive on the connection"""
     decode_responses: bool = dataclasses.field(default=False)
+    """Whether to return values as strings rather than bytes"""
     encoding: str = dataclasses.field(default="utf-8")
-    encoding_errors: str = dataclasses.field(default="strict")
+    """Specifies the encoding used when decoding responses. Only relevant if decode_responses is True"""
+    encoding_errors: typing.Literal['strict', 'ignore', 'replace'] = dataclasses.field(default="strict")
+    """Defines error handling for encoding issues. Only relevant if decode_responses is True"""
     health_check_interval: int = dataclasses.field(default=0)
+    """Defines how frequently health checks are performed on connections. 0 disables health checks"""
     client_name: typing.Optional[str] = dataclasses.field(default=None)
+    """Specifies a custom name for the client"""
     ssl: bool = dataclasses.field(default=False)
+    """Enables SSL/TLS encryption when connection to redis"""
     ssl_keyfile: typing.Optional[str] = dataclasses.field(default=None)
+    """Path to a private key file for SSL connections. Required if the redis instance uses client authentication"""
     ssl_certfile: typing.Optional[str] = dataclasses.field(default=None)
-    ssl_cert_reqs: str = dataclasses.field(default="required")
+    """Path to client certificate file for SSL connections. Needed for mutual TLS authentication"""
+    ssl_cert_reqs: typing.Literal['none', 'optional', 'required'] = dataclasses.field(default="required")
+    """Specifies SSL certificate validation level"""
     ssl_ca_certs: typing.Optional[str] = dataclasses.field(default=None)
+    """
+    Path to a CA (Certificate Authority) bundle for verifying the redis server's SSL certificate. 
+    Required if 'ssl_cert_reqs' is 'required'
+    """
     ssl_check_hostname: bool = dataclasses.field(default=False)
+    """Enables hostname verification when using SSL. Ensures the server certificate matches the expected hostname"""
 
     @property
     def specificity(self) -> float:
@@ -122,10 +155,27 @@ class Credential:
             parameters: typing.Dict[str, typing.Any] = {}
             for header, value in raw_credential.items():
                 field_type = fields.get(header)
+
                 if not field_type:
                     raise KeyError(f"Cannot load data from the store - '{header}' is not a valid field name")
 
-                parameters[header] = None if value is None else field_type(value)
+                if value is None:
+                    parameters[header] = None
+                elif isinstance(field_type, typing.Sequence) and not isinstance(field_type, str):
+                    if value not in field_type:
+                        raise ValueError(
+                            f"'{value}' is not a valid value for '{cls.__qualname__}.{header}' - "
+                            f"the only valid options are: {', '.join(map(str, field_type))}"
+                        )
+                    parameters[header] = value
+                elif callable(field_type):
+                    parameters[header] = field_type(value)
+                else:
+                    raise RuntimeError(
+                        f'{cls.__qualname__}.{header} does not have a valid field type: '
+                        f'{field_type} (type={type(field_type)})'
+                    )
+
             credential: Credential = cls(**parameters)
             credentials.append(credential)
 
@@ -166,7 +216,7 @@ class Credential:
         return credential
 
 
-def get_field_type(field: dataclasses.Field) -> type:
+def get_field_type(field: dataclasses.Field) -> typing.Union[type, typing.Sequence[typing.Any]]:
     """
     Gets the actual type of a given field. The 'type' on the field object itself is just its name, not the class
 
@@ -175,8 +225,16 @@ def get_field_type(field: dataclasses.Field) -> type:
     Can extract a type from a field whose type is 'typing.Optional[int]' or 'bool'
 
     :param field: A field from a dataclass
-    :return: The type object corresponding to the desired type of value
+    :return: The type object corresponding to the desired type of value or a list of possible values if the type was literal
     """
+    literal_match: typing.Optional[re.Match] = _LITERAL_PATTERN.search(field.type)
+    if literal_match:
+        possible_values = [
+            value.strip().strip('"') if value.strip().endswith('"') else value.strip().strip("'")
+            for value in literal_match["value"].split(",")
+        ]
+        return possible_values
+
     field_type_match: re.Match = _TYPE_PATTERN.search(field.type)
 
     if field_type_match:
@@ -279,8 +337,8 @@ def get_connection(**kwargs) -> Redis:
     """
     Get a connection to a redis instance by retrieving credentials from the store
 
-    :param kwargs:
-    :return:
+    :param kwargs: Filtering parameters used to deduce which connection to load.
+    :return: A redis connection if one could be found
     """
     credentials: typing.Sequence[Credential] = Credential.load()
 
